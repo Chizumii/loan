@@ -1,213 +1,162 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+import joblib
 import time
 
-# --- KONFIGURASI HALAMAN ---
+# ===============================
+# PAGE CONFIG
+# ===============================
 st.set_page_config(
-    page_title="Sistem Penilaian Kredit",
-    page_icon="🇮🇩",
-    layout="wide",
-    initial_sidebar_state="collapsed" # Sidebar ditutup agar fokus
+    page_title="Credit Risk Prediction System",
+    page_icon="💳",
+    layout="wide"
 )
 
-# --- SESSION STATE (NAVIGASI) ---
-if 'current_page' not in st.session_state:
-    st.session_state['current_page'] = 'dashboard'
+# ===============================
+# LOAD ARTIFACTS
+# ===============================
+@st.cache_resource
+def load_artifacts():
+    logreg = joblib.load("logreg_model.pkl")
+    xgb = joblib.load("xgb_model.pkl")
+    scaler = joblib.load("scaler.pkl")
+    features = joblib.load("feature_list.pkl")
+    return logreg, xgb, scaler, features
 
-def navigate_to(page):
-    st.session_state['current_page'] = page
-    st.rerun()
+logreg_model, xgb_model, scaler, FEATURE_LIST = load_artifacts()
 
-# --- CUSTOM CSS ---
-st.markdown("""
-<style>
-    .stApp { background-color: #ffffff; }
-    h1, h2, h3 { font-family: 'Segoe UI', sans-serif; color: #0f172a; font-weight: 600; }
-    .stMarkdown p { color: #334155; font-size: 1.05rem; }
-    
-    div[data-testid="stExpander"] { border: 1px solid #e2e8f0; border-radius: 8px; background-color: #f8fafc; }
-    
-    /* Tombol Utama */
-    .stButton button {
-        background-color: #0f172a;
-        color: white;
-        border-radius: 6px;
-        padding: 0.6rem 1.2rem;
-        font-weight: 500;
-        border: none;
-        width: 100%;
-        transition: all 0.2s;
-    }
-    .stButton button:hover {
-        background-color: #334155;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
-    
-    /* Tombol Back */
-    div[data-testid="stButton"] button[kind="secondary"] {
-        background-color: transparent;
-        color: #64748b;
-        border: 1px solid #cbd5e1;
-    }
-    div[data-testid="stButton"] button[kind="secondary"]:hover {
-        background-color: #f1f5f9;
-        color: #0f172a;
-    }
-</style>
-""", unsafe_allow_html=True)
+EXCHANGE_RATE = 16000  # USD → IDR (training consistency)
 
-# --- KONSTANTA MATA UANG (IDR) ---
-CURS_SYMBOL = "Rp"
-EXCHANGE_RATE = 16000 # Asumsi kurs untuk normalisasi ke model (1 USD = 16.000 IDR)
+# ===============================
+# PREPROCESS INPUT
+# ===============================
+def preprocess_input(
+    annual_inc,
+    loan_amount,
+    term,
+    int_rate,
+    dti,
+    home_ownership,
+    emp_length
+):
+    data = {}
 
-# ==============================================================================
-# HALAMAN 1: DASHBOARD
-# ==============================================================================
-if st.session_state['current_page'] == 'dashboard':
-    
-    col1, col2 = st.columns([3, 1])
+    # Numeric
+    data["annual_inc"] = np.log1p(annual_inc / EXCHANGE_RATE)
+    data["loan_amnt"] = loan_amount / EXCHANGE_RATE
+    data["int_rate"] = int_rate
+    data["dti"] = min(dti, 100)
+    data["term"] = 36 if term == "36 months" else 60
+
+    emp_map = {
+        "< 1 year": 0,
+        "1-3 years": 2,
+        "4-7 years": 5,
+        "8-10 years": 9,
+        "10+ years": 10
+    }
+    data["emp_length"] = emp_map.get(emp_length, 0)
+
+    # Initialize all features = 0
+    for col in FEATURE_LIST:
+        if col not in data:
+            data[col] = 0
+
+    # One-hot home ownership
+    if f"home_ownership_{home_ownership}" in FEATURE_LIST:
+        data[f"home_ownership_{home_ownership}"] = 1
+
+    df_input = pd.DataFrame([data])[FEATURE_LIST]
+    return df_input
+
+# ===============================
+# UI
+# ===============================
+st.title("💳 Credit Risk Prediction System")
+st.markdown("Predict **loan repayment probability** using Machine Learning.")
+
+model_choice = st.radio(
+    "Choose Model:",
+    ["Logistic Regression (Explainable)", "XGBoost (High Performance)"]
+)
+
+st.markdown("---")
+
+tab1, tab2 = st.tabs(["🧑 Manual Input", "📁 Upload CSV"])
+
+# ===============================
+# TAB 1 — MANUAL INPUT
+# ===============================
+with tab1:
+    col1, col2 = st.columns(2)
+
     with col1:
-        st.title("Sistem Penilaian Risiko Kredit")
-        st.markdown(f"""
-        Sistem pendukung keputusan kredit berbasis data untuk **Indonesia**. 
-        Menggunakan analisis parameter finansial untuk mengestimasi risiko peminjam secara objektif.
-        
-        **Mata Uang Operasional:** Indonesian Rupiah (IDR)
-        """)
-        
-        st.write("") 
-        # Tombol Navigasi ke Halaman Analisis
-        st.button("Buat Analisis Baru ➜", on_click=navigate_to, args=('analysis',))
+        annual_inc = st.number_input("Annual Income (IDR)", 0, value=120_000_000)
+        loan_amount = st.number_input("Loan Amount (IDR)", 0, value=50_000_000)
+        term = st.selectbox("Loan Term", ["36 months", "60 months"])
 
     with col2:
-        # Metrik Ringkasan
-        st.metric("Total Aplikasi", "1,240", "+5%")
-        st.metric("Rata-rata Approval", "72%", "-1.5%")
+        int_rate = st.number_input("Interest Rate (%)", 0.0, 40.0, 11.5)
+        dti = st.number_input("Debt-to-Income Ratio (%)", 0.0, 100.0, 18.0)
+        home_ownership = st.selectbox("Home Ownership", ["RENT", "OWN", "MORTGAGE"])
+        emp_length = st.selectbox(
+            "Employment Length",
+            ["< 1 year", "1-3 years", "4-7 years", "8-10 years", "10+ years"]
+        )
 
-# ==============================================================================
-# HALAMAN 2: ANALISIS (FORM & HASIL)
-# ==============================================================================
-elif st.session_state['current_page'] == 'analysis':
-    
-    # Tombol Back
-    col_back, col_title = st.columns([1, 10])
-    with col_back:
-        st.write("") 
-        if st.button("← Kembali"):
-            navigate_to('dashboard')
-            
-    with col_title:
-        st.title("Formulir Pengajuan Kredit")
+    if st.button("🔍 Predict Risk"):
+        with st.spinner("Running model..."):
+            time.sleep(0.8)
 
-    st.markdown("Lengkapi data pemohon di bawah ini. Semua nilai dalam **Rupiah (Rp)**.")
-    
-    # --- FORM INPUT ---
-    with st.container():
-        col_left, col_right = st.columns(2, gap="large")
-        
-        # Input Data Pemohon
-        with col_left:
-            st.subheader("Profil Pemohon")
-            with st.expander("Data Pribadi & Pekerjaan", expanded=True):
-                annual_inc = st.number_input(
-                    f"Pendapatan Tahunan ({CURS_SYMBOL})", 
-                    min_value=0, 
-                    value=120000000, # Default 120 Juta/Tahun (Gaji 10jt/bulan)
-                    step=5000000,
-                    format="%d",
-                    help="Total gaji kotor dalam setahun (Gaji bulanan x 12)"
-                )
-                home_ownership = st.selectbox("Status Rumah", ["MORTGAGE (KPR)", "OWN (Milik Sendiri)", "RENT (Sewa)", "OTHER"])
-                emp_length = st.selectbox("Lama Bekerja", ["< 1 tahun", "1-3 tahun", "4-7 tahun", "8-10 tahun", "10+ tahun"])
-        
-        # Input Data Pinjaman
-        with col_right:
-            st.subheader("Parameter Pinjaman")
-            with st.expander("Detail Finansial", expanded=True):
-                loan_amount = st.number_input(
-                    f"Jumlah Pinjaman ({CURS_SYMBOL})", 
-                    min_value=0, 
-                    value=50000000, # Default 50 Juta
-                    step=1000000,
-                    format="%d"
-                )
-                col_sub1, col_sub2 = st.columns(2)
-                with col_sub1: term = st.selectbox("Tenor", ["36 Bulan", "60 Bulan"])
-                with col_sub2: int_rate = st.number_input("Suku Bunga (%)", 0.0, 30.0, 11.5, step=0.1)
-                dti = st.number_input("DTI Ratio (%)", 0.0, 100.0, 18.0, step=0.1, help="Debt-to-Income Ratio (Rasio Hutang terhadap Pendapatan)")
+            X_input = preprocess_input(
+                annual_inc,
+                loan_amount,
+                term,
+                int_rate,
+                dti,
+                home_ownership,
+                emp_length
+            )
 
-    st.markdown("---")
-    analyze_btn = st.button("Hitung Risiko Kredit")
+            X_scaled = scaler.transform(X_input)
 
-    # --- LOGIKA KALKULASI ---
-    if analyze_btn:
-        with st.spinner('Sedang menganalisis profil risiko...'):
-            time.sleep(1) # Simulasi loading
-            
-            # 1. NORMALISASI KE USD (Agar logika model konsisten)
-            # Input user (IDR) dibagi kurs (16.000)
-            inc_usd = annual_inc / EXCHANGE_RATE
-            loan_usd = loan_amount / EXCHANGE_RATE
-            
-            # 2. ALGORITMA SCORING (SIMULASI SENSITIF)
-            # Faktor 1: DTI & Bunga
-            risk_score = (dti * 0.6) + (int_rate * 0.3)
-            
-            # Faktor 2: Rasio Pinjaman terhadap Gaji
-            # Jika pinjaman terlalu besar dibanding gaji tahunan, risiko naik
-            if inc_usd > 0:
-                loan_to_income = loan_usd / inc_usd
-                risk_score += (loan_to_income * 20)
-            
-            # Faktor 3: Bonus Profil
-            if "OWN" in home_ownership or "MORTGAGE" in home_ownership: 
-                risk_score -= 5
-            if emp_length in ["8-10 tahun", "10+ tahun"]: 
-                risk_score -= 3
-            
-            # Normalisasi skor 0-100
-            risk_score = max(0, min(risk_score, 100))
-            prob_default = risk_score / 100
-            
-            # 3. HITUNG LIMIT AMAN (DALAM IDR)
-            monthly_inc = annual_inc / 12
-            max_installment = monthly_inc * 0.35 # Max cicilan aman: 35% gaji
-            
-            r = (int_rate / 100) / 12
-            n = 36 if "36" in term else 60
-            
-            # Max pinjaman berdasarkan cicilan aman
-            max_loan_limit = max_installment * (1 - (1 + r)**(-n)) / r
-            
-            # 4. KEPUTUSAN AKHIR
-            # Disetujui jika risiko rendah (<50%) DAN pinjaman tidak melebihi 120% limit aman
-            is_approved = (prob_default < 0.5) and (loan_amount <= max_loan_limit * 1.2)
+            model = logreg_model if "Logistic" in model_choice else xgb_model
+            prob_good = model.predict_proba(X_scaled)[0][1]
+            prob_default = 1 - prob_good
 
-        # --- HASIL ANALISIS ---
-        st.subheader("Hasil Analisis")
-        r_col1, r_col2 = st.columns([1, 3])
-        
-        with r_col1:
-            final_score = int(100 - risk_score)
-            st.metric("Skor Kredit", f"{final_score}/100", 
-                     delta="Risiko Rendah" if final_score > 60 else "Risiko Tinggi",
-                     delta_color="normal" if final_score > 60 else "inverse")
-        
-        with r_col2:
-            # Format Rupiah
-            formatted_limit = f"{CURS_SYMBOL} {int(max_loan_limit):,}".replace(",", ".")
-            formatted_loan = f"{CURS_SYMBOL} {int(loan_amount):,}".replace(",", ".")
-            
-            if is_approved:
-                if loan_amount <= max_loan_limit:
-                    st.success("✅ **REKOMENDASI: DISETUJUI**")
-                    st.write("Profil risiko pemohon rendah dan kapasitas pembayaran mencukupi.")
-                    st.markdown(f"**Jumlah Disetujui:** {formatted_loan}")
-                else:
-                    st.warning("⚠️ **REKOMENDASI: DISETUJUI SEBAGIAN (TURUN PLAFON)**")
-                    st.write("Profil risiko bagus, namun jumlah pengajuan melebihi kapasitas cicilan aman.")
-                    st.markdown(f"**Limit Disarankan:** {formatted_limit}")
-                
-            else:
-                st.error("❌ **REKOMENDASI: DITOLAK**")
-                st.write(f"Risiko gagal bayar terlalu tinggi (Probabilitas: {prob_default:.1%}) atau beban utang berlebihan.")
+        st.subheader("📊 Prediction Result")
+        st.metric("Probability Fully Paid", f"{prob_good:.2%}")
+        st.metric("Probability Default", f"{prob_default:.2%}")
+
+        if prob_good >= 0.6:
+            st.success("✅ Recommended: APPROVE")
+        elif prob_good >= 0.45:
+            st.warning("⚠️ Recommended: REVIEW")
+        else:
+            st.error("❌ Recommended: REJECT")
+
+# ===============================
+# TAB 2 — CSV UPLOAD
+# ===============================
+with tab2:
+    uploaded_file = st.file_uploader("Upload CSV (same format as training features)", type="csv")
+
+    if uploaded_file:
+        df_test = pd.read_csv(uploaded_file)
+
+        st.write("Preview:")
+        st.dataframe(df_test.head())
+
+        if st.button("Run Batch Prediction"):
+            model = logreg_model if "Logistic" in model_choice else xgb_model
+
+            df_test_scaled = scaler.transform(df_test[FEATURE_LIST])
+            probs = model.predict_proba(df_test_scaled)[:, 1]
+
+            df_test["prob_fully_paid"] = probs
+            df_test["decision"] = np.where(probs >= 0.6, "APPROVE",
+                                  np.where(probs >= 0.45, "REVIEW", "REJECT"))
+
+            st.success("Prediction completed")
+            st.dataframe(df_test.head())
